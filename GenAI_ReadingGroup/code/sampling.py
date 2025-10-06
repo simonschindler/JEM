@@ -10,7 +10,6 @@ import matplotlib.animation as animation
 class SGLD:
     """
     Implements Stochastic Gradient Langevin Dynamics (SGLD) for sampling from an energy-based model.
-    This version includes improved, flexible initialization for new MCMC chains.
     """
 
     def __init__(
@@ -50,7 +49,6 @@ class SGLD:
         self.batch_size = batch_size
         self.domain_dims = domain_dims
 
-        # --- IMPROVEMENT: Store initialization parameters ---
         if init_strategy not in ["uniform", "gaussian"]:
             raise ValueError("init_strategy must be 'uniform' or 'gaussian'")
         self.init_strategy = init_strategy
@@ -62,7 +60,6 @@ class SGLD:
     def _initialize_samples(self, num_samples: int) -> t.Tensor:
         """
         Helper function to generate new samples based on the chosen strategy.
-        This centralizes the initialization logic.
         """
         shape = (num_samples, self.domain_dims)
         if self.init_strategy == "uniform":
