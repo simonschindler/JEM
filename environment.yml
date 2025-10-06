@@ -1,0 +1,12 @@
+name: flow_matching
+channels:
+  - defaults
+dependencies:
+  - numpy
+  - pytorch
+  - python=3.9
+  - matplotlib
+  - pip
+  - tqdm
+  - jupyter
+prefix: /Users/simon/miniconda3/envs/flow_matching
