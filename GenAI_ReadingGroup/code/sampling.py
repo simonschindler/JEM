@@ -1,231 +1,319 @@
-import torch as t
+# -*- coding: utf-8 -*-
+"""
+Demonstration of Stochastic Gradient Langevin Dynamics (SGLD) for sampling
+from an Energy-Based Model (EBM) defined by a Gaussian Mixture Model (GMM).
+
+This script visualizes how SGLD samples evolve over time to match the
+target probability distribution defined by the GMM's energy landscape.
+"""
+
+import torch
 import torch.nn as nn
-from typing import Literal
+from typing import Literal, Tuple
 from tqdm import tqdm
+import numpy as np
 
 from matplotlib import pyplot as plt
 import matplotlib.animation as animation
+import matplotlib.colors as mcolors
+
+# --- 1. SGLD Sampler Implementation ---
 
 
 class SGLD:
     """
-    Implements Stochastic Gradient Langevin Dynamics (SGLD) for sampling from an energy-based model.
+    Implements the Stochastic Gradient Langevin Dynamics (SGLD) sampler.
+
+    SGLD is a sampling method from the family of Markov Chain Monte Carlo (MCMC)
+    algorithms. It is designed to draw samples from a probability distribution
+    p(x) which is known up to a normalization constant, typical for Energy-Based
+    Models where p(x) ∝ exp(-E(x)).
+
+    The update rule for SGLD at step k is:
+    $$
+    x_{k+1} = x_k - \\frac{\\alpha_k}{2} \\nabla_x E(x_k) + \\sqrt{\\alpha_k} \\epsilon_k
+    $$
+    where:
+    - $x_k$ is the sample at step k.
+    - $\\alpha_k$ is the step size (learning rate).
+    - $\\nabla_x E(x_k)$ is the gradient of the energy function w.r.t. the sample x.
+    - $\\epsilon_k$ is Gaussian noise, $\\epsilon_k \\sim \\mathcal{N}(0, I)$.
     """
 
     def __init__(
         self,
         model: nn.Module,
-        alpha=0.1,
-        beta=0.9,
-        gamma=0.95,
-        batch_size=128,
-        domain_dims=1,
-        device="cpu",
+        domain_dims: int,
+        batch_size: int = 128,
+        device: str = "cpu",
+        alpha: float = 0.1,
+        gamma: float = 0.95,
+        replay_buffer_prob: float = 0.95,
         init_strategy: Literal["uniform", "gaussian"] = "uniform",
-        init_range=(-1, 1),
+        init_params: Tuple[float, float] = (-1.0, 1.0),
     ) -> None:
         """
         Initializes the SGLD sampler.
 
         Args:
-            model (nn.Module): The energy-based model to sample from.
-            alpha (float): The initial step size.
-            beta (float): The fraction of samples to carry over from the previous
-                          batch (for persistent chain).
-            gamma (float): The decay factor for the step size.
-            batch_size (int): The number of samples to generate in each batch.
-            domain_dims (int): The dimensionality of the sample space.
-            device (str): The device to perform computations on (e.g., "cpu", "cuda").
-            init_strategy (str): Strategy for initializing new chains.
-                                 Options: 'uniform' or 'gaussian'.
-            init_range (tuple): For 'uniform', a (min, max) tuple.
-                                For 'gaussian', a (mean, std) tuple.
+            model (nn.Module): The energy-based model. Its forward pass should
+                return the energy of the input samples.
+            domain_dims (int): The dimensionality of the sample space (e.g., 2 for 2D points).
+            batch_size (int): The number of parallel chains (samples) to run.
+            device (str): The device to perform computations on ("cpu", "cuda").
+            alpha (float): The initial step size for the Langevin dynamics.
+            gamma (float): The decay factor for the step size scheduler ($\alpha_k = \alpha \cdot \gamma^k$).
+            replay_buffer_prob (float): The probability of reusing a sample from the
+                previous batch (from the persistent chain) vs. reinitializing it.
+                This is equivalent to `beta` in the original code.
+            init_strategy (str): Strategy for initializing new chains ('uniform' or 'gaussian').
+            init_params (tuple): For 'uniform', this is (min, max). For 'gaussian',
+                this is (mean, std).
         """
         self.model = model
-        self.alpha = alpha
-        self.beta = beta
-        self.gamma = gamma
-        self.device = device
-        self.batch_size = batch_size
         self.domain_dims = domain_dims
+        self.batch_size = batch_size
+        self.device = device
+        self.alpha = alpha
+        self.gamma = gamma
+        self.replay_buffer_prob = replay_buffer_prob
 
         if init_strategy not in ["uniform", "gaussian"]:
             raise ValueError("init_strategy must be 'uniform' or 'gaussian'")
         self.init_strategy = init_strategy
-        self.init_param1, self.init_param2 = init_range
+        self.init_params = init_params
 
-        # Initialize the persistent chain (replay buffer) using the chosen strategy.
-        self.x = self._initialize_samples(self.batch_size)
+        # Initialize the persistent chain (also known as a replay buffer).
+        self.replay_buffer = self._initialize_samples(self.batch_size)
 
-    def _initialize_samples(self, num_samples: int) -> t.Tensor:
-        """
-        Helper function to generate new samples based on the chosen strategy.
-        """
+    def _initialize_samples(self, num_samples: int) -> torch.Tensor:
+        """Helper to generate new samples based on the initialization strategy."""
         shape = (num_samples, self.domain_dims)
         if self.init_strategy == "uniform":
-            # Sample from U(min, max)
-            min_val, max_val = self.init_param1, self.init_param2
-            return (max_val - min_val) * t.rand(shape, device=self.device) + min_val
+            min_val, max_val = self.init_params
+            return (max_val - min_val) * torch.rand(shape, device=self.device) + min_val
         elif self.init_strategy == "gaussian":
-            # Sample from N(mean, std^2)
-            mean, std = self.init_param1, self.init_param2
-            return t.randn(shape, device=self.device) * std + mean
-        return t.zeros(shape, device=self.device)
+            mean, std = self.init_params
+            return torch.randn(shape, device=self.device) * std + mean
+        # Fallback, though validation should prevent this.
+        return torch.zeros(shape, device=self.device)
 
-    def reset_x(self):
-        """Resets the persistent chain to a new set of random samples."""
-        self.x = self._initialize_samples(self.batch_size)
-
-    def sample(self, cond=False, n_steps=20):
+    def sample(self, n_steps: int = 20) -> torch.Tensor:
         """
-        Generates a batch of samples using SGLD.
+        Generates a batch of samples by running the SGLD chain for n_steps.
+
+        Args:
+            n_steps (int): The number of SGLD steps to perform.
+
+        Returns:
+            torch.Tensor: A tensor of generated samples of shape (batch_size, domain_dims).
         """
         self.model.eval()
 
-        num_reinit = int((1.0 - self.beta) * self.batch_size)
+        # Decide which samples in the buffer to reinitialize.
+        num_reinit = int((1.0 - self.replay_buffer_prob) * self.batch_size)
         if num_reinit > 0:
-            rand_indices = t.randperm(self.batch_size, device=self.device)[:num_reinit]
-            self.x[rand_indices, :] = self._initialize_samples(num_reinit)
+            reinit_indices = torch.randperm(self.batch_size, device=self.device)[
+                :num_reinit
+            ]
+            self.replay_buffer[reinit_indices] = self._initialize_samples(num_reinit)
 
-        x_k = self.x.clone().requires_grad_(True)
+        # Create a new tensor for the current chain, enabling gradient tracking.
+        samples = self.replay_buffer.clone().requires_grad_(True)
 
         for i in range(n_steps):
             step_size = self.alpha * (self.gamma**i)
-            if cond:
-                grad_x = t.autograd.grad(
-                    -t.logsumexp(self.model(x_k), keepdim=True, axis=-1).sum(),
-                    [x_k],
-                    retain_graph=True,
-                )[0]
-            else:
-                grad_x = t.autograd.grad(
-                    self.model(x_k).sum(), [x_k], retain_graph=True
-                )[0]
-            noise = t.sqrt(t.tensor(step_size, device=self.device)) * t.randn_like(x_k)
-            x_k.data.add_(-step_size / 2 * grad_x + noise)
+
+            # Calculate the energy and gradients.
+            energy = -self.model(samples)
+
+            # For conditional/multi-class models, the energy is the log-sum-exp
+            # of the class-conditional energies to get the marginal energy.
+            if energy.ndim > 1 and energy.shape[1] > 1:
+                energy = -torch.logsumexp(-energy, dim=-1)
+
+            (grad,) = torch.autograd.grad(energy.sum(), [samples], retain_graph=True)
+
+            # SGLD update step: gradient descent + Gaussian noise.
+            noise = torch.sqrt(torch.tensor(step_size)) * torch.randn_like(samples)
+            samples.data.add_(-0.5 * step_size * grad + noise)
 
         self.model.train()
-        self.x = x_k.detach()
+        # Update the replay buffer with the new samples for the next round.
+        self.replay_buffer = samples.detach()
 
-        return self.x
+        return self.replay_buffer
 
 
-if __name__ == "__main__":
-    device = t.device("cuda" if t.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
+# --- 2. Energy-Based Model (GMM) Implementation ---
 
-    def E_theta(mus, x):
-        """Vectorized energy function for a Gaussian Mixture Model."""
+
+class GaussianMixtureEBM(nn.Module):
+    """
+    An Energy-Based Model representing a Gaussian Mixture Model.
+
+    This model can represent either:
+    1. An unconditional GMM: E(x) is the energy of a single mixture.
+    2. A conditional GMM: E(x) is a vector of energies, one for each class/mixture.
+    """
+
+    def __init__(self, mus: torch.Tensor):
+        """
+        Args:
+            mus (torch.Tensor): The means of the Gaussian components.
+                - For unconditional model: shape (n_means, n_dims)
+                - For conditional model: shape (n_classes, n_means_per_class, n_dims)
+        """
+        super().__init__()
+        self.mus = nn.Parameter(mus, requires_grad=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Calculates the energy E(x) for a batch of samples.
+
+        The energy is based on the negative log-likelihood of a GMM, ignoring
+        normalization constants.
+        Energy E(x) = -log(Σ_i exp(-||x - μ_i||² / 2))
+
+        Args:
+            x (torch.Tensor): Input samples, shape (batch_size, n_dims).
+
+        Returns:
+            torch.Tensor: Energy values.
+                - Unconditional: shape (batch_size,)
+                - Conditional: shape (batch_size, n_classes)
+        """
+        # Reshape inputs for vectorized computation:
+        # x: (batch_size, 1, 1, n_dims) or (batch_size, 1, n_dims)
+        # mus: (1, n_classes, n_means, n_dims) or (1, n_means, n_dims)
         x_expanded = x.unsqueeze(1)
-        mus_expanded = mus.unsqueeze(0)
-        terms = -((x_expanded - mus_expanded) ** 2) / 2
-        energy = -t.logsumexp(terms.sum(dim=2), dim=1)
-        return energy
+        mus_expanded = self.mus.unsqueeze(0)
+        if self.mus.ndim > 2:  # Conditional case
+            x_expanded = x_expanded.unsqueeze(1)
 
-    def p_theta(mus, x):
-        """Unnormalized probability density function."""
-        return t.exp(-E_theta(mus, x))
+        # Calculate squared Euclidean distance
+        # terms shape: (batch_size, n_classes, n_means) or (batch_size, n_means)
+        log_probs = -0.5 * torch.sum((x_expanded - mus_expanded) ** 2, dim=-1)
+        # aggregate per class -> shape: (batch_size,n_classes)
+        log_probs = torch.logsumexp(log_probs, dim=-1)
+        return log_probs
 
-    # EBM-GMM in torch
-    class EBM_GMM(nn.Module):
-        def __init__(self, mus):
-            super().__init__()
-            # Move mus to the correct device upon initialization
-            self.mus = mus.to(device)
 
-        def forward(self, x):
-            return E_theta(self.mus, x)
+# --- 3. Main Execution Block ---
 
-    class EBM_GMM_2class(nn.Module):
-        def __init__(self, mus1, mus2):
-            super().__init__()
-            # Move mus to the correct device upon initialization
-            self.mus1 = mus1.to(device)
-            self.mus2 = mus2.to(device)
 
-        def forward(self, x):
-            e1 = E_theta(self.mus1, x)
-            e2 = E_theta(self.mus2, x)
-            return t.stack([e1, e2], dim=1)
-
-    # --- 1. SETUP THE MODEL AND DATA ---
-    two_class = False
-    if two_class:
-        mus1 = t.tensor([[-5.0, 0.0], [3.0, 1.0]])
-        mus2 = t.tensor([[0.0, -4.0], [2.0, -8.0]])
-        mus = t.stack((mus1, mus2))
-        gmm = EBM_GMM_2class(mus1=mus1, mus2=mus2)
+def setup_model_and_sampler(config: dict, device: str) -> Tuple[nn.Module, SGLD]:
+    """Initializes the EBM and SGLD sampler based on the configuration."""
+    if config["USE_CONDITIONAL_GMM"]:
+        mus1 = torch.tensor([[-5.0, 0.0], [3.0, 1.0]])
+        mus2 = torch.tensor([[0.0, -4.0], [2.0, -8.0]])
+        mus = torch.stack((mus1, mus2))  # Shape: (2, 2, 2)
     else:
-        mus = t.tensor([[-5.0, 0.0], [3.0, 1.0], [0.0, -4.0], [2.0, -8.0]])
-        gmm = EBM_GMM(mus=mus)
+        mus = torch.tensor(
+            [[-5.0, 0.0], [3.0, 1.0], [0.0, -4.0], [2.0, -8.0]]
+        )  # Shape: (4, 2)
 
-    # --- 2. RUN THE SGLD SAMPLER ---
-    sgld = SGLD(
-        model=gmm,
-        domain_dims=2,
-        batch_size=2000,
+    gmm_ebm = GaussianMixtureEBM(mus=mus).to(device)
+
+    sgld_sampler = SGLD(
+        model=gmm_ebm,
+        domain_dims=config["DOMAIN_DIMS"],
+        batch_size=config["BATCH_SIZE"],
         device=device,
         init_strategy="uniform",
-        init_range=(-10, 10),
+        init_params=(-10, 10),
     )
+    return gmm_ebm, sgld_sampler
 
-    s = []
+
+def run_sampling(sampler: SGLD, config: dict) -> list:
+    """Runs the SGLD sampler and collects the history of samples."""
     print("Generating SGLD samples...")
-    for i in tqdm(range(100)):
-        # Detach and move to CPU for plotting
-        s.append(sgld.sample(n_steps=50).cpu().clone())
+    sample_history = []
+    for _ in tqdm(range(config["ANIMATION_FRAMES"])):
+        samples = sampler.sample(n_steps=config["SGLD_STEPS_PER_FRAME"])
+        sample_history.append(samples.cpu().clone())
+    return sample_history
 
-    # --- 3. SETUP THE PLOT FOR ANIMATION ---
+
+def create_animation(
+    gmm_ebm: nn.Module, sample_history: list, config: dict, device: str
+):
+    """Creates and displays an animation of the sampling process."""
     print("Setting up animation plot...")
-    # Create a 1x2 subplot figure
     fig, axes = plt.subplots(1, 2, figsize=(16, 7))
 
-    # Create grid for plotting the probability landscape
-    xlims = t.tensor([-10.0, 10.0])
-    ylims = t.tensor([-10.0, 10.0])
-    npoints = 200
+    # Create grid for plotting the probability/energy landscape
+    x_coords = torch.linspace(-10, 10, 200)
+    y_coords = torch.linspace(-10, 10, 200)
+    grid_x, grid_y = torch.meshgrid(x_coords, y_coords, indexing="xy")
+    grid = torch.stack([grid_x.reshape(-1), grid_y.reshape(-1)], dim=1).to(device)
 
-    X_coords = t.linspace(xlims[0], xlims[1], npoints)
-    Y_coords = t.linspace(ylims[0], ylims[1], npoints)
-    X, Y = t.meshgrid(X_coords, Y_coords, indexing="xy")
+    # Calculate energy and probability landscapes
+    with torch.no_grad():
+        gmm_ebm.eval()
+        energy_grid = gmm_ebm(grid)
+        # For conditional model, get marginal energy
+        if energy_grid.ndim > 1 and energy_grid.shape[1] > 1:
+            energy_grid = -torch.logsumexp(energy_grid, dim=-1)
+        energy_grid = energy_grid.reshape(200, 200).cpu()
+        prob_grid = torch.exp(-energy_grid)
 
-    X_grid = t.stack([X.reshape(-1), Y.reshape(-1)], dim=1).to(device)
+    # Define colors for the GMM means if using conditional model
+    # You can customize these colors
+    mean_colors = ["green", "purple", "orange", "cyan", "magenta", "yellow"]
+    n_classes = gmm_ebm.mus.shape[0] if gmm_ebm.mus.ndim > 2 else 1
 
-    with t.no_grad():
-        # Calculate both probability and energy landscapes
-        gmm.eval()
-        if two_class:
-            energy = -t.logsumexp(gmm(X_grid), axis=-1).reshape(npoints, npoints).cpu()
-            probs = t.exp(energy)
+    # Plot landscapes
+    for i, (title, data, cmap) in enumerate(
+        [
+            (
+                r"Probability Landscape $p_\theta(x) \propto \exp(-E_\theta(x))$",
+                prob_grid,
+                "Blues",
+            ),
+            (r"Energy Landscape $E_\theta(x)$", energy_grid, "Reds"),
+        ]
+    ):
+        axes[i].contourf(grid_x, grid_y, data, levels=50, cmap=cmap)
+
+        if config["USE_CONDITIONAL_GMM"]:
+            # Iterate through classes and plot their means with different colors
+            for class_idx in range(n_classes):
+                class_mus = gmm_ebm.mus[class_idx].cpu().numpy()
+                axes[i].plot(
+                    class_mus[:, 0],
+                    class_mus[:, 1],
+                    marker="x",
+                    markersize=10,
+                    markeredgewidth=2,
+                    linestyle="None",
+                    color=mean_colors[
+                        class_idx % len(mean_colors)
+                    ],  # Cycle through defined colors
+                    label=f"Class {class_idx + 1} Means",
+                )
         else:
-            energy = gmm(X_grid).reshape(npoints, npoints).cpu()
-            energy = -energy
-            probs = t.exp(energy)
+            # Unconditional case, plot all means with a single color
+            mus_cpu = gmm_ebm.mus.cpu().view(-1, 2).numpy()
+            axes[i].plot(
+                mus_cpu[:, 0],
+                mus_cpu[:, 1],
+                "kx",
+                markersize=10,
+                markeredgewidth=2,
+                label="GMM Means",
+            )
 
-    # --- Plot p_theta on the left subplot (axes[0]) ---
-    axes[0].contourf(X, Y, probs, levels=50, cmap="Blues")
-    axes[0].plot(
-        mus[:, 0], mus[:, 1], "kx", markersize=10, markeredgewidth=2, label="GMM Means"
-    )
-    axes[0].set_title(r"Probability Landscape $p_\theta(x)$")
-    axes[0].set_xlabel("x1")
-    axes[0].set_ylabel("x2")
-    axes[0].legend()
-    axes[0].set_aspect("equal", adjustable="box")
+        axes[i].set_title(title)
+        axes[i].set_xlabel("$x_1$")
+        axes[i].set_ylabel("$x_2$")
+        axes[i].legend()
+        axes[i].set_aspect("equal", "box")
 
-    # --- Plot E_theta on the right subplot (axes[1]) ---
-    axes[1].contourf(X, Y, energy, levels=50, cmap="Reds")
-    axes[1].plot(
-        mus[:, 0], mus[:, 1], "kx", markersize=10, markeredgewidth=2, label="GMM Means"
-    )
-    axes[1].set_title(r"Energy Landscape $E_\theta(x)$")
-    axes[1].set_xlabel("x1")
-    axes[1].legend()
-    axes[1].set_aspect("equal", adjustable="box")
-
-    # Initialize two scatter plots for the samples, one for each subplot
-    scatter_p = axes[0].scatter(s[0][:, 0], s[0][:, 1], c="r", s=10, alpha=0.7)
-    scatter_e = axes[1].scatter(s[0][:, 0], s[0][:, 1], c="b", s=10, alpha=0.7)
+    # Setup scatter plots for animation
+    scatter_p = axes[0].scatter([], [], c="r", s=10, alpha=0.7, label="SGLD Samples")
+    scatter_e = axes[1].scatter([], [], c="b", s=10, alpha=0.7, label="SGLD Samples")
     iter_text = axes[0].text(
         0.05,
         0.95,
@@ -235,35 +323,48 @@ if __name__ == "__main__":
         verticalalignment="top",
         bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.5),
     )
+    axes[0].legend()
+    axes[1].legend()
     fig.tight_layout()
 
-    # --- 4. DEFINE ANIMATION FUNCTIONS ---
+    # Animation functions
     def init():
-        """Initializes the animation."""
-        scatter_p.set_offsets(s[0])
-        scatter_e.set_offsets(s[0])
+        """Initializes the animation with empty 2D data."""
+        empty_offsets = np.empty((0, 2))
+        scatter_p.set_offsets(empty_offsets)
+        scatter_e.set_offsets(empty_offsets)
         iter_text.set_text("")
         return scatter_p, scatter_e, iter_text
 
     def update(frame):
         """Update function for the animation."""
-        data = s[frame]
-        # Update the positions of the scatter plot points on both plots
+        data = sample_history[frame]
         scatter_p.set_offsets(data)
         scatter_e.set_offsets(data)
-        iter_text.set_text(f"Iteration: {frame + 1}")
+        iter_text.set_text(f"Frame: {frame + 1}/{len(sample_history)}")
         return scatter_p, scatter_e, iter_text
 
-    # --- 5. CREATE AND DISPLAY THE ANIMATION ---
     print("Creating animation...")
     ani = animation.FuncAnimation(
-        fig,
-        update,
-        frames=len(s),
-        init_func=init,
-        blit=True,
-        interval=50,  # Delay between frames in milliseconds
+        fig, update, frames=len(sample_history), init_func=init, blit=True, interval=50
     )
-
-    # Display the animation in a live window
     plt.show()
+
+
+if __name__ == "__main__":
+    # --- Configuration ---
+    CONFIG = {
+        "USE_CONDITIONAL_GMM": False,  # <--- SET THIS TO TRUE
+        "DOMAIN_DIMS": 2,
+        "BATCH_SIZE": 2000,
+        "ANIMATION_FRAMES": 100,
+        "SGLD_STEPS_PER_FRAME": 50,
+    }
+
+    # --- Main Execution ---
+    DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {DEVICE}")
+
+    model, sampler = setup_model_and_sampler(CONFIG, DEVICE)
+    history = run_sampling(sampler, CONFIG)
+    create_animation(model, history, CONFIG, DEVICE)

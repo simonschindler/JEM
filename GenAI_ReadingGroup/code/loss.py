@@ -12,7 +12,7 @@ class p_x_loss(nn.Module):
 
     def forward(self, x):
         # sample from the model with SGLD
-        x_sample = self.sgld.sample(n_steps=self.sample_steps, cond=True)
+        x_sample = self.sgld.sample(n_steps=self.sample_steps)
         # compute mean energy of x and of the sample
         e_sample = self.f(x_sample).mean()
         e_x = self.f(x).mean()
