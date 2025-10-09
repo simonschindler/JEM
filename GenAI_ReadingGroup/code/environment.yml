@@ -1,0 +1,11 @@
+name: JEM 
+channels:
+  - defaults
+dependencies:
+  - numpy
+  - pytorch
+  - python=3.9
+  - matplotlib
+  - pip
+  - tqdm
+  - jupyter

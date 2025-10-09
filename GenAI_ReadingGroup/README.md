@@ -7,6 +7,20 @@ This repository contains the code and resources for a reading group session on J
 - `code/`: Contains the Python code for implementing and training JEM.
 - `pdf/`: Contains the research paper and presentation slides.
 
+## Installation
+
+To set up the required environment, please use the `environment.yml` file located in the `code` directory. Follow these steps:
+
+1.  **Create the Conda environment:**
+    ```bash
+    conda env create -f code/environment.yml
+    ```
+
+2.  **Activate the environment:**
+    ```bash
+    conda activate JEM
+    ```
+
 ## Code Components
 
 The `code/` directory is structured as follows:
