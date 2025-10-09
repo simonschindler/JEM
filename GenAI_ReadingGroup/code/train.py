@@ -128,3 +128,75 @@ class Training:
         self.epoch = checkpoint["epoch"]
         print(f"Checkpoint loaded from {path}")
         return checkpoint
+
+
+class JEM_Training(Training):
+    def train_step(self, x_batch: t.Tensor, y_batch: t.Tensor) -> float:
+        """
+        Performs a single training step: forward pass, loss calculation,
+        backward pass, and optimizer step.
+        """
+        self.model.train()
+        x_batch, y_batch = x_batch.to(self.device), y_batch.to(self.device)
+
+        loss = self.loss_fn(x_batch, y_batch)[0]
+
+        self.optim.zero_grad()
+        loss.backward()
+        self.optim.step()
+
+        self.loss_fn.p_x_loss.sgld.model = self.model  # keep model updated in SGLD sampler
+
+        return loss.item()
+
+    def evaluate(self, dataloader: DataLoader) -> tuple[float, dict]:
+        """
+        Evaluates the model on a given dataset.
+
+        Args:
+            dataloader (DataLoader): The DataLoader providing the evaluation data.
+
+        Returns:
+            tuple[float, dict]: A tuple containing the average loss and a dictionary
+                                with classification metrics (precision, recall, f1-score).
+        """
+        self.model.eval()  # Set the model to evaluation mode
+        total_loss = 0.0
+        total_p_x_loss = 0.0
+        total_x_ent_loss = 0.0
+        all_preds = []
+        all_labels = []
+
+        for x_batch, y_batch in dataloader:
+            x_batch, y_batch = x_batch.to(self.device), y_batch.to(self.device)
+
+            # Forward pass
+            loss, p_x_loss, x_ent_loss = self.loss_fn(x_batch, y_batch)
+            total_loss += loss.item()
+            total_x_ent_loss += x_ent_loss.item()
+            total_p_x_loss += p_x_loss.item()
+
+            y_pred_logits = self.model(x_batch)
+            # Get predictions from logits
+            preds = t.argmax(y_pred_logits, dim=1)
+
+            # Store predictions and true labels
+            all_preds.append(preds.cpu())
+            all_labels.append(y_batch.cpu())
+
+        # Concatenate all batches
+        all_preds = t.cat(all_preds)
+        all_labels = t.cat(all_labels)
+
+        # Calculate average loss
+        avg_loss = total_loss / len(dataloader)
+        avg_x_ent_loss = total_x_ent_loss / len(dataloader)
+        avg_p_x_loss = total_p_x_loss / len(dataloader)
+
+        # Generate classification report
+        # output_dict=True makes it easy to parse the results later
+        metrics = classification_report(
+            all_labels.numpy(), all_preds.numpy(), output_dict=True, zero_division=0
+        )
+
+        return avg_loss, avg_p_x_loss, avg_x_ent_loss, metrics
