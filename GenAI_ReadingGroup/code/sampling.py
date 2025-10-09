@@ -20,6 +20,28 @@ import matplotlib.colors as mcolors
 # --- 1. SGLD Sampler Implementation ---
 
 
+# -*- coding: utf-8 -*-
+"""
+Demonstration of Stochastic Gradient Langevin Dynamics (SGLD) for sampling
+from an Energy-Based Model (EBM) defined by a Gaussian Mixture Model (GMM).
+
+This script visualizes how SGLD samples evolve over time to match the
+target probability distribution defined by the GMM's energy landscape.
+"""
+
+import torch
+import torch.nn as nn
+from typing import Literal, Tuple
+from tqdm import tqdm
+import numpy as np
+
+from matplotlib import pyplot as plt
+import matplotlib.animation as animation
+import matplotlib.colors as mcolors
+
+# --- 1. SGLD Sampler Implementation ---
+
+
 class SGLD:
     """
     Implements the Stochastic Gradient Langevin Dynamics (SGLD) sampler.
@@ -48,7 +70,7 @@ class SGLD:
         device: str = "cpu",
         alpha: float = 0.1,
         gamma: float = 0.95,
-        replay_buffer_prob: float = 0.95,
+        replay_prob: float = 0.95,
         init_strategy: Literal["uniform", "gaussian"] = "uniform",
         init_params: Tuple[float, float] = (-1.0, 1.0),
     ) -> None:
@@ -63,9 +85,8 @@ class SGLD:
             device (str): The device to perform computations on ("cpu", "cuda").
             alpha (float): The initial step size for the Langevin dynamics.
             gamma (float): The decay factor for the step size scheduler ($\alpha_k = \alpha \cdot \gamma^k$).
-            replay_buffer_prob (float): The probability of reusing a sample from the
-                previous batch (from the persistent chain) vs. reinitializing it.
-                This is equivalent to `beta` in the original code.
+            replay_prob (float): The probability of re-using a sample from the
+                replay buffer vs. re-initializing it.
             init_strategy (str): Strategy for initializing new chains ('uniform' or 'gaussian').
             init_params (tuple): For 'uniform', this is (min, max). For 'gaussian',
                 this is (mean, std).
@@ -76,7 +97,7 @@ class SGLD:
         self.device = device
         self.alpha = alpha
         self.gamma = gamma
-        self.replay_buffer_prob = replay_buffer_prob
+        self.replay_prob = replay_prob
 
         if init_strategy not in ["uniform", "gaussian"]:
             raise ValueError("init_strategy must be 'uniform' or 'gaussian'")
@@ -111,7 +132,7 @@ class SGLD:
         self.model.eval()
 
         # Decide which samples in the buffer to reinitialize.
-        num_reinit = int((1.0 - self.replay_buffer_prob) * self.batch_size)
+        num_reinit = int((1.0 - self.replay_prob) * self.batch_size)
         if num_reinit > 0:
             reinit_indices = torch.randperm(self.batch_size, device=self.device)[
                 :num_reinit
@@ -143,6 +164,7 @@ class SGLD:
         self.replay_buffer = samples.detach()
 
         return self.replay_buffer
+
 
 
 # --- 2. Energy-Based Model (GMM) Implementation ---

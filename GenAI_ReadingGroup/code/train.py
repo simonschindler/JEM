@@ -1,4 +1,4 @@
-import torch as t
+import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from sklearn.metrics import classification_report  # For detailed metrics
@@ -14,7 +14,7 @@ class Training:
     def __init__(
         self,
         model: nn.Module,
-        optim: t.optim.Optimizer,
+        optim: torch.optim.Optimizer,
         loss_fn: nn.Module,
         device: str = "cpu",
     ) -> None:
@@ -24,7 +24,7 @@ class Training:
         self.device = device
         self.epoch = 0
 
-    def train_step(self, x_batch: t.Tensor, y_batch: t.Tensor) -> float:
+    def train_step(self, x_batch: torch.Tensor, y_batch: torch.Tensor) -> float:
         """
         Performs a single training step: forward pass, loss calculation,
         backward pass, and optimizer step.
@@ -68,15 +68,14 @@ class Training:
             dataloader (DataLoader): The DataLoader providing the evaluation data.
 
         Returns:
-            tuple[float, dict]: A tuple containing the average loss and a dictionary
-                                with classification metrics (precision, recall, f1-score).
+            A tuple containing the average loss and a classification report.
         """
         self.model.eval()  # Set the model to evaluation mode
         total_loss = 0.0
         all_preds = []
         all_labels = []
 
-        with t.no_grad():  # Disable gradient calculations
+        with torch.no_grad():  # Disable gradient computation
             for x_batch, y_batch in dataloader:
                 x_batch, y_batch = x_batch.to(self.device), y_batch.to(self.device)
 
@@ -88,21 +87,20 @@ class Training:
                 total_loss += loss.item()
 
                 # Get predictions from logits
-                preds = t.argmax(y_pred_logits, dim=1)
+                preds = torch.argmax(y_pred_logits, dim=1)
 
                 # Store predictions and true labels
                 all_preds.append(preds.cpu())
                 all_labels.append(y_batch.cpu())
 
         # Concatenate all batches
-        all_preds = t.cat(all_preds)
-        all_labels = t.cat(all_labels)
+        all_preds = torch.cat(all_preds)
+        all_labels = torch.cat(all_labels)
 
         # Calculate average loss
         avg_loss = total_loss / len(dataloader)
 
         # Generate classification report
-        # output_dict=True makes it easy to parse the results later
         metrics = classification_report(
             all_labels.numpy(), all_preds.numpy(), output_dict=True, zero_division=0
         )
@@ -117,12 +115,12 @@ class Training:
             "optimizer_state_dict": self.optim.state_dict(),
         }
         checkpoint.update(kwargs)
-        t.save(checkpoint, path)
-        print(f"\nCheckpoint saved to {path}")
+        torch.save(checkpoint, path)
+        print(f"Checkpoint saved to {path}")
 
     def load_checkpoint(self, path: str):
         """Loads the model and optimizer state from a file."""
-        checkpoint = t.load(path, map_location=self.device)
+        checkpoint = torch.load(path, map_location=self.device)
         self.model.load_state_dict(checkpoint["model_state_dict"])
         self.optim.load_state_dict(checkpoint["optimizer_state_dict"])
         self.epoch = checkpoint["epoch"]
@@ -131,70 +129,71 @@ class Training:
 
 
 class JEM_Training(Training):
-    def train_step(self, x_batch: t.Tensor, y_batch: t.Tensor) -> float:
+    """
+    A specialized training class for Joint Energy Models (JEM).
+    """
+
+    def train_step(self, x_batch: torch.Tensor, y_batch: torch.Tensor) -> float:
         """
-        Performs a single training step: forward pass, loss calculation,
-        backward pass, and optimizer step.
+        Performs a single training step for the JEM model.
         """
         self.model.train()
         x_batch, y_batch = x_batch.to(self.device), y_batch.to(self.device)
 
+        # The loss function for JEM returns three values:
+        # total_loss, cross_entropy_loss, and generative_loss
         loss = self.loss_fn(x_batch, y_batch)[0]
 
         self.optim.zero_grad()
         loss.backward()
         self.optim.step()
 
-        self.loss_fn.p_x_loss.sgld.model = self.model  # keep model updated in SGLD sampler
+        # Update the model in the SGLD sampler to ensure it uses the latest weights
+        self.loss_fn.p_x_loss.sgld.model = self.model
 
         return loss.item()
 
-    def evaluate(self, dataloader: DataLoader) -> tuple[float, dict]:
+    def evaluate(self, dataloader: DataLoader) -> tuple[float, float, float, dict]:
         """
-        Evaluates the model on a given dataset.
-
-        Args:
-            dataloader (DataLoader): The DataLoader providing the evaluation data.
+        Evaluates the JEM model on a given dataset.
 
         Returns:
-            tuple[float, dict]: A tuple containing the average loss and a dictionary
-                                with classification metrics (precision, recall, f1-score).
+            A tuple containing the average total loss, generative loss, cross-entropy
+            loss, and a classification report.
         """
-        self.model.eval()  # Set the model to evaluation mode
+        self.model.eval()
         total_loss = 0.0
         total_p_x_loss = 0.0
         total_x_ent_loss = 0.0
         all_preds = []
         all_labels = []
 
+  
         for x_batch, y_batch in dataloader:
             x_batch, y_batch = x_batch.to(self.device), y_batch.to(self.device)
 
-            # Forward pass
+            # Forward pass to get losses
             loss, p_x_loss, x_ent_loss = self.loss_fn(x_batch, y_batch)
             total_loss += loss.item()
             total_x_ent_loss += x_ent_loss.item()
             total_p_x_loss += p_x_loss.item()
 
+            # Forward pass to get predictions
             y_pred_logits = self.model(x_batch)
-            # Get predictions from logits
-            preds = t.argmax(y_pred_logits, dim=1)
+            preds = torch.argmax(y_pred_logits, dim=1)
 
-            # Store predictions and true labels
             all_preds.append(preds.cpu())
             all_labels.append(y_batch.cpu())
 
-        # Concatenate all batches
-        all_preds = t.cat(all_preds)
-        all_labels = t.cat(all_labels)
+        all_preds = torch.cat(all_preds)
+        all_labels = torch.cat(all_labels)
 
-        # Calculate average loss
+        # Calculate average losses
         avg_loss = total_loss / len(dataloader)
         avg_x_ent_loss = total_x_ent_loss / len(dataloader)
         avg_p_x_loss = total_p_x_loss / len(dataloader)
 
         # Generate classification report
-        # output_dict=True makes it easy to parse the results later
         metrics = classification_report(
             all_labels.numpy(), all_preds.numpy(), output_dict=True, zero_division=0
         )
