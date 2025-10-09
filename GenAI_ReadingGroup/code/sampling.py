@@ -1,34 +1,3 @@
-# -*- coding: utf-8 -*-
-"""
-Demonstration of Stochastic Gradient Langevin Dynamics (SGLD) for sampling
-from an Energy-Based Model (EBM) defined by a Gaussian Mixture Model (GMM).
-
-This script visualizes how SGLD samples evolve over time to match the
-target probability distribution defined by the GMM's energy landscape.
-"""
-
-import torch
-import torch.nn as nn
-from typing import Literal, Tuple
-from tqdm import tqdm
-import numpy as np
-
-from matplotlib import pyplot as plt
-import matplotlib.animation as animation
-import matplotlib.colors as mcolors
-
-# --- 1. SGLD Sampler Implementation ---
-
-
-# -*- coding: utf-8 -*-
-"""
-Demonstration of Stochastic Gradient Langevin Dynamics (SGLD) for sampling
-from an Energy-Based Model (EBM) defined by a Gaussian Mixture Model (GMM).
-
-This script visualizes how SGLD samples evolve over time to match the
-target probability distribution defined by the GMM's energy landscape.
-"""
-
 import torch
 import torch.nn as nn
 from typing import Literal, Tuple
