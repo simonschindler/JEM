@@ -76,7 +76,7 @@ class SGLD:
         """Resets the persistent chain to a new set of random samples."""
         self.x = self._initialize_samples(self.batch_size)
 
-    def sample(self, n_steps=20):
+    def sample(self, cond=False, n_steps=20):
         """
         Generates a batch of samples using SGLD.
         """
@@ -91,7 +91,16 @@ class SGLD:
 
         for i in range(n_steps):
             step_size = self.alpha * (self.gamma**i)
-            grad_x = t.autograd.grad(self.model(x_k).sum(), [x_k], retain_graph=True)[0]
+            if cond:
+                grad_x = t.autograd.grad(
+                    -t.logsumexp(self.model(x_k), keepdim=True, axis=-1).sum(),
+                    [x_k],
+                    retain_graph=True,
+                )[0]
+            else:
+                grad_x = t.autograd.grad(
+                    self.model(x_k).sum(), [x_k], retain_graph=True
+                )[0]
             noise = t.sqrt(t.tensor(step_size, device=self.device)) * t.randn_like(x_k)
             x_k.data.add_(-step_size / 2 * grad_x + noise)
 
@@ -127,9 +136,28 @@ if __name__ == "__main__":
         def forward(self, x):
             return E_theta(self.mus, x)
 
+    class EBM_GMM_2class(nn.Module):
+        def __init__(self, mus1, mus2):
+            super().__init__()
+            # Move mus to the correct device upon initialization
+            self.mus1 = mus1.to(device)
+            self.mus2 = mus2.to(device)
+
+        def forward(self, x):
+            e1 = E_theta(self.mus1, x)
+            e2 = E_theta(self.mus2, x)
+            return t.stack([e1, e2], dim=1)
+
     # --- 1. SETUP THE MODEL AND DATA ---
-    mus = t.tensor([[-5.0, 0.0], [3.0, 1.0], [0.0, -4.0], [2.0, -8.0]])
-    gmm = EBM_GMM(mus=mus)
+    two_class = False
+    if two_class:
+        mus1 = t.tensor([[-5.0, 0.0], [3.0, 1.0]])
+        mus2 = t.tensor([[0.0, -4.0], [2.0, -8.0]])
+        mus = t.stack((mus1, mus2))
+        gmm = EBM_GMM_2class(mus1=mus1, mus2=mus2)
+    else:
+        mus = t.tensor([[-5.0, 0.0], [3.0, 1.0], [0.0, -4.0], [2.0, -8.0]])
+        gmm = EBM_GMM(mus=mus)
 
     # --- 2. RUN THE SGLD SAMPLER ---
     sgld = SGLD(
@@ -165,8 +193,14 @@ if __name__ == "__main__":
 
     with t.no_grad():
         # Calculate both probability and energy landscapes
-        probs = p_theta(mus.to(device), X_grid).reshape(npoints, npoints).cpu()
-        energy = E_theta(mus.to(device), X_grid).reshape(npoints, npoints).cpu()
+        gmm.eval()
+        if two_class:
+            energy = -t.logsumexp(gmm(X_grid), axis=-1).reshape(npoints, npoints).cpu()
+            probs = t.exp(energy)
+        else:
+            energy = gmm(X_grid).reshape(npoints, npoints).cpu()
+            energy = -energy
+            probs = t.exp(energy)
 
     # --- Plot p_theta on the left subplot (axes[0]) ---
     axes[0].contourf(X, Y, probs, levels=50, cmap="Blues")
